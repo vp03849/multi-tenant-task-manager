@@ -4,7 +4,8 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.db.base import Base
-from app import models  # noqa
+from app.core.config import settings 
+import app.models #noqa: F401
 
 
 
@@ -67,8 +68,7 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    from app.core.config import DATABASE_URL
-    config.set_main_option("sqlalchemy.url", DATABASE_URL)
+    config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
