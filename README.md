@@ -1,6 +1,6 @@
 # Task Manager Backend
 
-A multi-tenant task management API built with FastAPI, PostgreSQL, and SQLAlchemy. Users belong to one or more workspaces, each acting as an isolated tenant boundary — projects and tasks live inside a workspace, and access is governed by role-based permissions (owner, admin, member) rather than simple login/logout access control. The project focuses on the parts of backend engineering that are easy to get wrong in real SaaS systems: correct tenant isolation, role-scoped authorization, and reproducible infrastructure via Docker and CI.
+A multi-tenant task management API built with FastAPI, PostgreSQL, and SQLAlchemy. Users belong to one or more workspaces, each acting as an isolated tenant boundary. Projects and tasks live inside a workspace, and access is governed by role-based permissions (owner, admin, member) rather than simple login/logout access control. The project focuses on the parts of backend engineering that are easy to get wrong in real SaaS systems: correct tenant isolation, role-scoped authorization, and reproducible infrastructure via Docker and CI.
 
 ## Architecture
 
@@ -9,21 +9,15 @@ A multi-tenant task management API built with FastAPI, PostgreSQL, and SQLAlchem
 | Entity | Purpose |
 |---|---|
 | `User` | account and credentials |
-| `Workspace` | the tenant boundary — everything below it is scoped to one workspace |
-| `WorkspaceMember` | join table: user ↔ workspace, carries the user's role |
+| `Workspace` | the tenant boundary. Everything below it is scoped to one workspace |
+| `WorkspaceMember` | join table: user to workspace, carries the user's role |
 | `Project` | belongs to exactly one workspace |
 | `Task` | belongs to exactly one project, optionally assigned to a user |
 
 ### Relationships
 
-```
-User ──< WorkspaceMember >── Workspace ──< Project ──< Task
-                                                          │
-                                              (assignee) User
-```
-
 - A `User` can belong to many `Workspace`s, through `WorkspaceMember`.
-- A `Workspace` is the multi-tenancy boundary. Every query below the workspace level is filtered by `workspace_id` — this is the most common place real SaaS backends leak data across tenants, and it's the part of the system this project is built around getting right.
+- A `Workspace` is the multi-tenancy boundary. Every query below the workspace level is filtered by `workspace_id`.
 - A `Project` always has exactly one `workspace_id`.
 - A `Task` always has exactly one `project_id`, and inherits its workspace through the project.
 
@@ -32,8 +26,8 @@ User ──< WorkspaceMember >── Workspace ──< Project ──< Task
 | Role | Typical permissions |
 |---|---|
 | `owner` | everything, including deleting the workspace and changing member roles |
-| `admin` | manage projects, tasks, and members; cannot delete the workspace |
-| `member` | create/update/assign tasks; cannot manage members or delete projects |
+| `admin` | manage projects, tasks, and members. Cannot delete the workspace |
+| `member` | create, update, and assign tasks. Cannot manage members or delete projects |
 
 ## Setup
 
@@ -90,18 +84,59 @@ docker compose down
 
 ## API Overview
 
-Full interactive documentation (with request/response schemas) is available at `/docs` once the app is running. Endpoints are grouped as:
+Full interactive documentation, with request and response schemas, is available at `/docs` once the app is running. Endpoints are grouped as:
 
-- **Auth** — register, login (JWT-based)
-- **Workspaces** — create workspace, invite members, list members
-- **Projects** — create and list projects within a workspace
-- **Tasks** — create, list (with status filtering and pagination), and update tasks within a project
+- **Auth**: register, login (JWT-based)
+- **Workspaces**: create workspace, invite members, list members
+- **Projects**: create and list projects within a workspace
+- **Tasks**: create, list (with status filtering and pagination), and update tasks within a project
 
 Every endpoint below the auth layer requires a valid Bearer token and enforces workspace-scoped role permissions.
 
+### Example usage
+
+A quick walkthrough of the core flow: register, log in, create a workspace (you're automatically made `owner`), and invite a teammate with a specific role.
+
+**1. Register and log in**
+```bash
+curl -X POST http://localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "owner@example.com", "password": "pw12345"}'
+
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "owner@example.com", "password": "pw12345"}'
+# => {"access_token": "eyJ...", "token_type": "bearer"}
+```
+```bash
+export TOKEN="eyJ..."
+```
+
+**2. Create a workspace**
+Creating a workspace automatically makes the creator its `owner`.
+```bash
+curl -X POST http://localhost:8000/workspaces/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Acme"}'
+# => {"id": "<workspace_id>", "name": "Acme"}
+```
+
+**3. Invite a teammate with a specific role**
+Only `owner`/`admin` can invite. `role` is one of `owner`, `admin`, or `member`.
+```bash
+curl -X POST http://localhost:8000/workspaces/<workspace_id>/members \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "teammate@example.com", "role": "member"}'
+```
+A `member` invited this way can create and update tasks, but cannot invite others or manage the workspace. Attempting to do so returns `403`. A user who was never added to this workspace at all gets `404` on any endpoint scoped to it, rather than a response confirming the workspace exists.
+
+For project and task CRUD and the full set of endpoints, use `/docs`.
+
 ## Running Tests
 
-Tests require a separate, disposable Postgres database (never the same one used for development data, since the test suite creates and drops all tables on every test run).
+Tests require a separate, disposable Postgres database, never the same one used for development data, since the test suite creates and drops all tables on every test run.
 
 ```bash
 createdb taskmanager_test
@@ -119,12 +154,12 @@ Test coverage includes:
 - Cross-workspace access is blocked (non-members get `404`, not data)
 - End-to-end task creation and status updates
 
-CI runs this same suite automatically on every push via GitHub Actions (`.github/workflows/ci.yml`), against a fresh Postgres instance, followed by a Docker image build — verifying both the application logic and the container packaging independently.
+CI runs this same suite automatically on every push via GitHub Actions (`.github/workflows/ci.yml`), against a fresh Postgres instance, followed by a Docker image build. This verifies both the application logic and the container packaging independently.
 
 ## Design Decisions
 
-**UUIDs instead of auto-incrementing integer IDs.** Sequential IDs leak information (e.g. total user count, growth rate) and are easy to enumerate across tenants. UUIDs avoid both problems and are the standard choice for any system where multiple tenants share the same tables.
+**UUIDs instead of auto-incrementing integer IDs.** Sequential IDs leak information, such as total user count and growth rate, and are easy to enumerate across tenants. UUIDs avoid both problems and are the standard choice for any system where multiple tenants share the same tables.
 
-**404, not 403, for non-members.** When a user isn't a member of a workspace at all, the API returns `404 Not Found` rather than `403 Forbidden`. A `403` confirms the resource exists but access is denied — which, for a user with no relationship to that workspace, discloses more than necessary. `403` is reserved for users who *are* members but lack a specific permission, where confirming the workspace's existence is already safe.
+**404, not 403, for non-members.** When a user isn't a member of a workspace at all, the API returns `404 Not Found` rather than `403 Forbidden`. A `403` confirms the resource exists but access is denied, which discloses more than necessary to a user with no relationship to that workspace. `403` is reserved for users who are members but lack a specific permission, where confirming the workspace's existence is already safe.
 
-**Role-based permissions instead of a granular permissions table.** Permissions are defined as a fixed mapping from role to a set of allowed actions (`ROLE_PERMISSIONS`), rather than a fully dynamic, database-backed permissions system. For a project of this scope, three fixed roles (owner/admin/member) cover the realistic access patterns without the added complexity of a permissions-management UI or schema. This trade-off would be revisited if the system needed custom, per-workspace roles.
+**Role-based permissions instead of a granular permissions table.** Permissions are defined as a fixed mapping from role to a set of allowed actions (`ROLE_PERMISSIONS`), rather than a fully dynamic, database-backed permissions system. For a project of this scope, three fixed roles (owner, admin, member) cover the realistic access patterns without the added complexity of a permissions-management UI or schema. This trade-off would be revisited if the system needed custom, per-workspace roles.
